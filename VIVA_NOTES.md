@@ -242,3 +242,32 @@ The fold-to-fold SD of AUC is 0.0059 to 0.0151, so the optimism is small and wit
 **Likely follow-up:** How do you know the test set was not misused?
 
 **Short answer:** `test.csv` has no labels, and the script stops if a label or payout column appears. The features use only presented columns, and nothing is fitted on the test file: the scaler and model are fitted on training data only. Model and C were fixed before the single prediction, and no test feedback was used.
+
+## Error analysis and calibration (`src/error_analysis.py`)
+
+**What was done:** Fitted the final model (E2a, C = 0.1) on the 5 grouped training folds, so every row's probability comes from a model that never saw that participant. Scored subgroups and participants, drew reliability plots with 10 equal-width bins, and examined rows that were confidently wrong. `test.csv` was not read.
+
+**Key numbers (mean over folds, except calibration and participant figures):**
+- AUC by domain: mixed 0.8720, loss 0.7450, gain 0.7180. Within gain problems: loss frame 0.7464, gain frame 0.6531.
+- AUC by session: paid 0.8043, hypothetical 0.7561. By time pressure: none 0.7947, pressure 0.7357.
+- Overall ECE 0.0381 (bootstrap 95% interval 0.0299 to 0.0510), calibration slope 1.013.
+- Paid ECE 0.0571, slope 1.195. Hypothetical ECE 0.0342, slope 0.891. Paid minus hypothetical ECE: interval 0.0011 to 0.0413.
+- Confidently wrong: 210 rows from 124 participants, against about 181 expected from the model's own probabilities.
+
+**Why:** Overall scores hide where a model fails. Calibration checks whether its probabilities can be taken at face value, which AUC does not measure.
+
+**Likely viva question:** What does calibration tell you that AUC does not?
+
+**Short answer:** AUC only checks ranking: multiplying every log-odds by a positive constant leaves it unchanged. Calibration checks the probability values: of the rows given about 0.7, did about 70% choose risky? ECE is the size-weighted average gap between predicted and observed rates across bins. The paid sessions show why you need both: they have the better AUC but the worse ECE.
+
+**Likely follow-up:** What does a calibration slope above or below 1 mean?
+
+**Short answer:** It comes from regressing the choice on the logit of the prediction. Above 1 means the predictions are too cautious, and below 1 means they are too extreme. The overall slope of 1.013 looks almost perfect, yet paid is 1.195 and hypothetical is 0.891. The model has no session column, so it uses one scale for both, and the two errors roughly cancel when pooled.
+
+**Likely follow-up:** Why are your hardest participants not evidence of something special about those people?
+
+**Short answer:** Each person has only 40 rows, so accuracy varies by chance. The SD of per-person accuracy is 0.0913, and chance alone would give about 0.0737. Picking the extremes therefore selects partly on luck. Several hardest participants do have risky rates far from their mean prediction (S180 chose risky 87.5% of the time against a mean prediction of 0.527), which fits the model having no per-person term, but that is an explanation I did not test separately.
+
+**Likely follow-up:** Are the confidently wrong rows just model mistakes?
+
+**Short answer:** Largely no. A calibrated model should be wrong sometimes: at p = 0.9, one in ten should go the other way. About 181 are expected and 210 occurred. The excess is mostly in p > 0.8 (98 against about 75). Compared with confident rows that were right, wrong rows have more time pressure and lower numeracy, and their participants' other choices lean the opposite way to the prediction. They do not mainly come from a few people: the top 10 participants hold 41 of the 210. These are associations in simulated data, not causes.
