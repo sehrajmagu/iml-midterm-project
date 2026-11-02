@@ -196,3 +196,49 @@ The decision boundary, where the log-odds equal 0, is therefore a straight line 
 **Likely follow-up:** Why does this model score lower than E2a?
 
 **Short answer:** Dropping raw amounts removes information, including what they reveal about domain and frame. These models test the frame, so they are not candidates for best predictor. Comparing them with E2a would change more than one thing.
+
+## Experiment E3: Grouped vs random validation (`random_row_folds`, `run_e3`)
+
+**What was done:** Ran the E2a logistic model under 5-fold GroupKFold by participant (with a grouped inner split) and under shuffled 5-fold KFold on rows, seed 0 (with a row-level inner split). A second pair added `age_years`, `numeracy_score` and `self_reported_risk_taking` as a diagnostic. Four rows were logged. The grouped E2a run matched the logged E2a row exactly, including C in every fold. E2b was dropped, and the person-column pair is not a replacement for it.
+
+**Result (random minus grouped):**
+- E2a features: AUC +0.0008, log-loss -0.0016.
+- With person columns: AUC +0.0035, log-loss -0.0034.
+
+The fold-to-fold SD of AUC is 0.0059 to 0.0151, so the optimism is small and within noise. In unlogged repeats over 5 other split seeds, the E2a difference averaged -0.0003 AUC, so even its sign is unstable. With person columns it averaged +0.0017 AUC.
+
+**Why:** The test set contains only people never seen in training. This experiment measures how much a row-level split would overstate performance on such people.
+
+**Expectation for the report:** A random split should score at least as high as a grouped split, because it validates on people already seen in training. The gap should be larger with person columns. Write this in your own words. The small size of the gap is a finding, so do not present it as something you predicted.
+
+**Likely viva question:** Why can't the person columns act as fingerprints under GroupKFold?
+
+**Short answer:** A fingerprint only helps if the model can link a validation row to the same person's rows in training. These columns are constant within a person, and 138 of the 210 participants have a combination of the three values that nobody else has. Under a random split, every validation row's participant was also in training. Under GroupKFold, each person is entirely in one fold, so no validation participant has any rows in training. The model can only learn what people with similar values tend to do, which is the same thing it can do for new people in the test set. A matching combination in training belongs to a different person.
+
+**Likely follow-up:** The data was designed so that random splits are optimistic. Why is the gap so small here?
+
+**Short answer:** Logistic regression gives each column one weight, so it has no way to memorise a person or a combination of values. Without person columns, it has almost no way to identify anyone at all, even though people differ a lot (the SD of per-person risky rates is 0.148). So the leak is real, but this model can barely use it. In an unlogged random forest check with the person columns, the gap grew to +0.0100 AUC and -0.0124 log-loss, against +0.0019 and -0.0048 without them. So the size of the optimism depends on the model, and a small gap here does not make random splits safe in general.
+
+**Likely follow-up:** Why not report a fold-by-fold paired difference, as in E1 and E2a?
+
+**Short answer:** The two schemes validate on different rows in each fold, so fold 1 of one has no matching fold 1 in the other. I can only compare their means, which is weaker than the paired comparisons used in E1 and E2a.
+
+## Final model and prediction file (`src/make_submission.py`)
+
+**What was done:** Fixed the final model as E2a: L2 logistic regression on the four raw columns, `ev_gap` and the three domain x frame indicators. Chose C with 5-fold GroupKFold on the full training data, from the grid 0.001, 0.01, 0.1, 1, 10, 100. Refitted on all 8,400 training rows, checked `test.csv`, predicted once, validated the output and saved `predictions/submission.csv`. No Kaggle score was used.
+
+**Result:** C = 0.1. Fixed-C CV: AUC 0.7777 (SD 0.0060), log-loss 0.5696 (SD 0.0047), accuracy 0.6917 (SD 0.0111). The fairer estimate is the nested E2a run: AUC 0.7776, log-loss 0.5706, accuracy 0.6905. The file has 3,600 rows, no missing values, the same IDs and row order as the sample file, and a mean predicted probability of 0.4870. The training risky rate is 0.4818.
+
+**Why E2a over E1:** AUC is effectively tied (0.7776 vs 0.7771; mean paired difference +0.0005, SD 0.0060). Log-loss is better for E2a in all 5 folds (0.5706 vs 0.5810; mean paired difference -0.0104, SD 0.0016). E1 has higher accuracy at 0.5 (0.7027 vs 0.6905), but accuracy is a secondary metric.
+
+**Likely viva question:** Why refit on all the training data, and how good do you expect the test score to be?
+
+**Short answer:** Cross-validation chooses the model and estimates its performance. Once those choices are fixed, using all 210 participants gives the best estimate of the coefficients. The refitted model has no held-out score of its own, so my estimate comes from cross-validation: an AUC near 0.78 on new participants. The nested run is the fairer number because C was chosen separately from the fold being scored. It could still be slightly optimistic because I compared several designs on the same folds, and the test score will also vary by chance across 90 participants.
+
+**Likely follow-up:** Why is C = 0.1 when the nested folds chose values from 0.01 to 100?
+
+**Short answer:** AUC is flat for C from 0.1 to 100, at 0.7777 to four decimals, so those values are effectively equal. The rule keeps the first and most strongly regularised C unless a later one is strictly higher. The nested folds varied because each saw a small inner split, and this choice used all five folds. The important point is that the final C makes little difference within this flat range.
+
+**Likely follow-up:** How do you know the test set was not misused?
+
+**Short answer:** `test.csv` has no labels, and the script stops if a label or payout column appears. The features use only presented columns, and nothing is fitted on the test file: the scaler and model are fitted on training data only. Model and C were fixed before the single prediction, and no test feedback was used.

@@ -61,7 +61,8 @@ def score_fold(y_true, p):
     }
 
 
-def summarise(model, fold_scores, features, params="", notes="", threshold=f"p>={THRESHOLD}", experiment="baseline"):
+def summarise(model, fold_scores, features, params="", notes="", threshold=f"p>={THRESHOLD}", experiment="baseline",
+              validation=f"GroupKFold({N_SPLITS}) by {GROUP}"):
     """Turn per-fold scores into one results row (mean and SD across folds)."""
     scores = pd.DataFrame(fold_scores)
     return {
@@ -70,7 +71,7 @@ def summarise(model, fold_scores, features, params="", notes="", threshold=f"p>=
         "model": model,
         "features": features,
         "params": params,
-        "validation": f"GroupKFold({N_SPLITS}) by {GROUP}",
+        "validation": validation,
         "seed": SEED,
         "auc_mean": round(scores["auc"].mean(), 4),
         "auc_std": round(scores["auc"].std(), 4),
@@ -169,12 +170,16 @@ def choose_C(X, y, groups, make_model=make_logistic):
     return best_C, best_auc
 
 
-def cross_validate_logistic(train, X):
-    """Run the logistic protocol on feature matrix X. Returns one dict per outer fold."""
+def cross_validate_logistic(train, X, splits=None, inner_groups=None):
+    """Run the logistic protocol on feature matrix X. Returns one dict per outer fold.
+
+    By default both the outer folds and the inner split are grouped by participant.
+    E3 passes its own splits and inner_groups to replace them.
+    """
     y = train[TARGET].to_numpy()
-    groups = train[GROUP].to_numpy()
+    groups = train[GROUP].to_numpy() if inner_groups is None else inner_groups
     folds = []
-    for train_idx, val_idx in grouped_folds(train):
+    for train_idx, val_idx in (grouped_folds(train) if splits is None else splits):
         C, inner_auc = choose_C(X[train_idx], y[train_idx], groups[train_idx])
         model = make_logistic(C).fit(X[train_idx], y[train_idx])
         scores = score_fold(y[val_idx], model.predict_proba(X[val_idx])[:, 1])
@@ -188,9 +193,9 @@ def print_logistic_folds(folds):
         print(f"fold {fold}: C={result['C']} inner_auc={result['inner_auc']:.4f} auc={s['auc']:.4f} log_loss={s['log_loss']:.4f} accuracy={s['accuracy']:.4f}")
 
 
-def logistic_params(folds):
+def logistic_params(folds, inner=f"GroupShuffleSplit({INNER_VAL_SHARE})"):
     chosen = [result["C"] for result in folds]
-    return f"C per fold={chosen}; grid={C_GRID}; inner=GroupShuffleSplit({INNER_VAL_SHARE}) by AUC"
+    return f"C per fold={chosen}; grid={C_GRID}; inner={inner} by AUC"
 
 
 def run_logistic(train):

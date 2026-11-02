@@ -1,15 +1,16 @@
 """Controlled experiments for Track B. Each one changes one thing from a baseline.
 
-Usage: python3 src/experiments.py {e1,e1_ablation,e2a,e2a_clean}
+Usage: python3 src/experiments.py {e1,e1_ablation,e2a,e2a_clean,e3}
 """
 import sys
 
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import KFold
 
 from baselines import (
-    RAW_FEATURES, cross_validate_logistic, ev_gap, load_train, log_run, logistic_params,
-    print_logistic_folds, summarise,
+    GROUP, INNER_VAL_SHARE, N_SPLITS, RAW_FEATURES, SEED, cross_validate_logistic, ev_gap,
+    load_train, log_run, logistic_params, print_logistic_folds, summarise,
 )
 
 WEALTH_FEATURES = ["wealth_if_high", "wealth_if_low", "wealth_if_sure"]
@@ -18,6 +19,7 @@ GAP_FEATURES = RAW_FEATURES + ["ev_gap"]
 FRAME_INVARIANT_FEATURES = ["prob_high", "ev_gap"] + WEALTH_FEATURES
 FRAME_FEATURES = ["gain_x_loss_frame", "loss_x_no_frame", "mixed_x_no_frame"]
 VALID_CELLS = {("gain", "gain_frame"), ("gain", "loss_frame"), ("loss", "none"), ("mixed", "none")}
+PERSON_FEATURES = ["age_years", "numeracy_score", "self_reported_risk_taking"]
 
 
 def theory_features(df):
@@ -144,14 +146,55 @@ def run_e2a_clean(train):
     ]
 
 
-RUNNERS = {"e1": run_e1, "e1_ablation": run_e1_ablation, "e2a": run_e2a, "e2a_clean": run_e2a_clean}
+def random_row_folds(train):
+    """Shuffled KFold on rows, so one participant's rows can be on both sides of a split."""
+    return list(KFold(n_splits=N_SPLITS, shuffle=True, random_state=SEED).split(train))
+
+
+def run_e3(train):
+    """E3: grouped vs random validation on the E2a model. Only the split changes."""
+    e2a = pd.concat([gap_features(train), frame_features(train)], axis=1)
+    feature_sets = {
+        "E2a features: raw 4 + ev_gap + domain x frame cells": e2a,
+        "E2a features + person columns (age, numeracy, risk taking); diagnostic": pd.concat([e2a, train[PERSON_FEATURES]], axis=1),
+    }
+    rows = []
+    for description, X in feature_sets.items():
+        print(description)
+        grouped = cross_validate_logistic(train, X.to_numpy())
+        # Giving every row its own group turns the inner grouped split into a row-level split.
+        random = cross_validate_logistic(
+            train, X.to_numpy(), splits=random_row_folds(train), inner_groups=np.arange(len(train)),
+        )
+        print("grouped")
+        print_logistic_folds(grouped)
+        print("random")
+        print_logistic_folds(random)
+        difference = fold_table(random).mean() - fold_table(grouped).mean()
+        print(f"random minus grouped: auc={difference['auc']:+.4f} log_loss={difference['log_loss']:+.4f}")
+        rows.append(summarise(
+            "logistic_l2", [result["scores"] for result in grouped], experiment="E3", features=description,
+            params=logistic_params(grouped),
+        ))
+        rows.append(summarise(
+            "logistic_l2", [result["scores"] for result in random], experiment="E3", features=description,
+            params=logistic_params(random, inner=f"row-level split ({INNER_VAL_SHARE})"),
+            validation=f"KFold({N_SPLITS}, shuffle, seed={SEED}) on rows",
+        ))
+    return rows
+
+
+RUNNERS = {
+    "e1": run_e1, "e1_ablation": run_e1_ablation, "e2a": run_e2a, "e2a_clean": run_e2a_clean,
+    "e3": run_e3,
+}
 
 
 def main():
     rows = RUNNERS[sys.argv[1]](load_train())
     for row in rows:
         log_run(row)
-    print(pd.DataFrame(rows)[["experiment", "features", "auc_mean", "auc_std", "log_loss_mean", "log_loss_std", "accuracy_mean", "accuracy_std"]].to_string(index=False))
+    print(pd.DataFrame(rows)[["experiment", "validation", "features", "auc_mean", "auc_std", "log_loss_mean", "log_loss_std", "accuracy_mean", "accuracy_std"]].to_string(index=False))
 
 
 if __name__ == "__main__":
