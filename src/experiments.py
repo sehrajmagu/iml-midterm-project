@@ -9,8 +9,8 @@ import pandas as pd
 from sklearn.model_selection import KFold
 
 from baselines import (
-    GROUP, INNER_VAL_SHARE, N_SPLITS, RAW_FEATURES, SEED, cross_validate_logistic, ev_gap,
-    load_train, log_run, logistic_params, print_logistic_folds, summarise,
+    N_SPLITS, RAW_FEATURES, SEED, cross_validate_logistic, ev_gap, load_train, log_run, logistic_row,
+    print_logistic_folds, print_rows, timed_logistic,
 )
 
 WEALTH_FEATURES = ["wealth_if_high", "wealth_if_low", "wealth_if_sure"]
@@ -74,32 +74,30 @@ def print_paired_difference(new, baseline):
 def run_e1(train):
     """E1: the logistic baseline with theory features added. Only the features change."""
     baseline = cross_validate_logistic(train, train[RAW_FEATURES].to_numpy())
-    folds = cross_validate_logistic(train, theory_features(train).to_numpy())
+    folds, runtime_s = timed_logistic(train, theory_features(train).to_numpy())
     print_logistic_folds(folds)
     print_paired_difference(folds, baseline)
     print("fold 1 coefficients (per SD of each feature):")
     print(pd.Series(folds[0]["model"][-1].coef_[0], index=E1_FEATURES).round(4).to_string())
-    return [summarise(
-        "logistic_l2", [result["scores"] for result in folds], experiment="E1",
-        features="raw 4 + ev_gap + final wealth (high, low, sure); P(larger outcome)=prob_high, no duplicate column",
-        params=logistic_params(folds),
+    return [logistic_row(
+        folds, runtime_s, "B06", "E1", "raw4+ev_gap+wealth", "src/experiments.py#run_e1",
+        notes="wealth = endowment + each outcome; P(larger outcome)=prob_high (no duplicate column)",
     )]
 
 
 def run_e1_ablation(train):
     """Log the two parts of E1 separately: ev_gap alone, and endowment alone."""
-    feature_sets = {
-        "raw 4 + ev_gap (no endowment)": gap_features(train),
-        "raw 4 + endowment_inr only": train[RAW_FEATURES + ["endowment_inr"]],
-    }
+    runs = [
+        ("B07", "raw4+ev_gap", gap_features(train), "E1 ablation: no endowment"),
+        ("B08", "raw4+endowment", train[RAW_FEATURES + ["endowment_inr"]], "E1 ablation"),
+    ]
     rows = []
-    for description, X in feature_sets.items():
-        print(description)
-        folds = cross_validate_logistic(train, X.to_numpy())
+    for run_id, feature_set, X, notes in runs:
+        print(feature_set)
+        folds, runtime_s = timed_logistic(train, X.to_numpy())
         print_logistic_folds(folds)
-        rows.append(summarise(
-            "logistic_l2", [result["scores"] for result in folds], experiment="E1-ablation",
-            features=description, params=logistic_params(folds),
+        rows.append(logistic_row(
+            folds, runtime_s, run_id, "E1-ablation", feature_set, "src/experiments.py#run_e1_ablation", notes=notes,
         ))
     return rows
 
@@ -109,15 +107,15 @@ def run_e2a(train):
     gap = gap_features(train)
     with_frame = pd.concat([gap, frame_features(train)], axis=1)
     baseline = cross_validate_logistic(train, gap.to_numpy())
-    folds = cross_validate_logistic(train, with_frame.to_numpy())
+    folds, runtime_s = timed_logistic(train, with_frame.to_numpy())
     print_logistic_folds(folds)
     print_paired_difference(folds, baseline)
     print("fold 1 coefficients (per SD of each feature):")
     print(pd.Series(folds[0]["model"][-1].coef_[0], index=with_frame.columns).round(4).to_string())
-    return [summarise(
-        "logistic_l2", [result["scores"] for result in folds], experiment="E2a",
-        features="raw 4 + ev_gap + frame and domain x frame cells (gain x loss_frame, loss x none, mixed x none); no endowment",
-        params=logistic_params(folds),
+    return [logistic_row(
+        folds, runtime_s, "B09", "E2a", "raw4+ev_gap+domain_x_frame", "src/experiments.py#run_e2a",
+        notes=("indicators gain x loss_frame / loss x none / mixed x none; no endowment; compare with B07; "
+               "also the grouped side of E3"),
     )]
 
 
@@ -125,24 +123,23 @@ def run_e2a_clean(train):
     """Clean frame test: features that do not change with the frame, with vs without a flag."""
     invariant = theory_features(train)[FRAME_INVARIANT_FEATURES]
     with_flag = invariant.assign(loss_frame=(train["frame"] == "loss_frame").astype(int))
-    baseline = cross_validate_logistic(train, invariant.to_numpy())
-    folds = cross_validate_logistic(train, with_flag.to_numpy())
+    baseline, baseline_runtime_s = timed_logistic(train, invariant.to_numpy())
+    folds, runtime_s = timed_logistic(train, with_flag.to_numpy())
     print("without flag")
     print_logistic_folds(baseline)
     print("with flag")
     print_logistic_folds(folds)
     print_paired_difference(folds, baseline)
     print("loss_frame coefficient by fold:", [round(result["model"][-1].coef_[0, -1], 4) for result in folds])
-    feature_sets = {
-        "prob_high + ev_gap + final wealth (high, low, sure); no raw amounts; no frame flag": baseline,
-        "prob_high + ev_gap + final wealth (high, low, sure); no raw amounts; plus loss_frame flag": folds,
-    }
+    code_reference = "src/experiments.py#run_e2a_clean"
     return [
-        summarise(
-            "logistic_l2", [result["scores"] for result in fold_results], experiment="E2a-clean",
-            features=description, params=logistic_params(fold_results),
-        )
-        for description, fold_results in feature_sets.items()
+        logistic_row(
+            baseline, baseline_runtime_s, "B10", "E2a-clean", "frame_invariant", code_reference,
+            notes="frame_invariant = prob_high+ev_gap+wealth; no raw amounts; no frame flag",
+        ),
+        logistic_row(
+            folds, runtime_s, "B11", "E2a-clean", "frame_invariant+loss_frame", code_reference, notes="compare with B10",
+        ),
     ]
 
 
@@ -154,16 +151,21 @@ def random_row_folds(train):
 def run_e3(train):
     """E3: grouped vs random validation on the E2a model. Only the split changes."""
     e2a = pd.concat([gap_features(train), frame_features(train)], axis=1)
-    feature_sets = {
-        "E2a features: raw 4 + ev_gap + domain x frame cells": e2a,
-        "E2a features + person columns (age, numeracy, risk taking); diagnostic": pd.concat([e2a, train[PERSON_FEATURES]], axis=1),
-    }
+    person = "person = age_years+numeracy_score+self_reported_risk_taking"
+    random_note = f"row-level KFold shuffle seed {SEED} with row-level inner split"
+    # (feature_set, X, grouped run_id or None, grouped notes, random run_id, random notes)
+    runs = [
+        ("raw4+ev_gap+domain_x_frame", e2a, None, "",
+         "B12", f"{random_note}; grouped counterpart is B09"),
+        ("raw4+ev_gap+domain_x_frame+person", pd.concat([e2a, train[PERSON_FEATURES]], axis=1), "B13", f"diagnostic; {person}",
+         "B14", f"diagnostic; {random_note}; grouped counterpart is B13"),
+    ]
     rows = []
-    for description, X in feature_sets.items():
-        print(description)
-        grouped = cross_validate_logistic(train, X.to_numpy())
+    for feature_set, X, grouped_id, grouped_notes, random_id, random_notes in runs:
+        print(feature_set)
+        grouped, grouped_runtime_s = timed_logistic(train, X.to_numpy())
         # Giving every row its own group turns the inner grouped split into a row-level split.
-        random = cross_validate_logistic(
+        random, random_runtime_s = timed_logistic(
             train, X.to_numpy(), splits=random_row_folds(train), inner_groups=np.arange(len(train)),
         )
         print("grouped")
@@ -172,14 +174,13 @@ def run_e3(train):
         print_logistic_folds(random)
         difference = fold_table(random).mean() - fold_table(grouped).mean()
         print(f"random minus grouped: auc={difference['auc']:+.4f} log_loss={difference['log_loss']:+.4f}")
-        rows.append(summarise(
-            "logistic_l2", [result["scores"] for result in grouped], experiment="E3", features=description,
-            params=logistic_params(grouped),
-        ))
-        rows.append(summarise(
-            "logistic_l2", [result["scores"] for result in random], experiment="E3", features=description,
-            params=logistic_params(random, inner=f"row-level split ({INNER_VAL_SHARE})"),
-            validation=f"KFold({N_SPLITS}, shuffle, seed={SEED}) on rows",
+        code_reference = "src/experiments.py#run_e3"
+        # The grouped run on the E2a features repeats B09 exactly, so it is not logged again.
+        if grouped_id:
+            rows.append(logistic_row(grouped, grouped_runtime_s, grouped_id, "E3", feature_set, code_reference, notes=grouped_notes))
+        rows.append(logistic_row(
+            random, random_runtime_s, random_id, "E3", feature_set, code_reference, notes=random_notes,
+            validation_scheme=f"RandomKFold{N_SPLITS}",
         ))
     return rows
 
@@ -194,7 +195,7 @@ def main():
     rows = RUNNERS[sys.argv[1]](load_train())
     for row in rows:
         log_run(row)
-    print(pd.DataFrame(rows)[["experiment", "validation", "features", "auc_mean", "auc_std", "log_loss_mean", "log_loss_std", "accuracy_mean", "accuracy_std"]].to_string(index=False))
+    print_rows(rows)
 
 
 if __name__ == "__main__":

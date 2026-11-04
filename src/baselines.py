@@ -3,8 +3,9 @@
 Usage: python3 src/baselines.py {constant,ev_rule,logistic,lda,svm}
 """
 import csv
+import os
 import sys
-from datetime import datetime, timezone
+import time
 from pathlib import Path
 
 import numpy as np
@@ -18,7 +19,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
-SEED = 0
+SEED = int(os.environ.get("IML_SEED", "0"))  # run_all.py --seed sets this
 N_SPLITS = 5
 TARGET = "chose_risky"
 GROUP = "participant_id"
@@ -31,11 +32,14 @@ ROOT = Path(__file__).resolve().parent.parent
 TRAIN_PATH = ROOT / "data" / "train.csv"
 RESULTS_PATH = ROOT / "experimental_results.csv"
 
+# Exactly the columns of the course's experimental_results_template.csv, in its order.
 RESULT_COLUMNS = [
-    "timestamp_utc", "experiment", "model", "features", "params", "validation", "seed",
-    "auc_mean", "auc_std", "log_loss_mean", "log_loss_std",
-    "accuracy_mean", "accuracy_std", "threshold", "notes",
+    "run_id", "track", "experiment", "model", "feature_set", "validation_scheme", "n_folds", "seed",
+    "hyperparameters", "primary_metric_name", "primary_metric_mean", "primary_metric_sd",
+    "secondary_metric_name", "secondary_metric_mean", "secondary_metric_sd", "threshold",
+    "runtime_s", "code_reference", "notes",
 ]
+GRID_LABEL = f"grid {C_GRID[0]}-{C_GRID[-1]}"
 
 
 def load_train():
@@ -61,46 +65,56 @@ def score_fold(y_true, p):
     }
 
 
-def summarise(model, fold_scores, features, params="", notes="", threshold=f"p>={THRESHOLD}", experiment="baseline",
-              validation=f"GroupKFold({N_SPLITS}) by {GROUP}"):
-    """Turn per-fold scores into one results row (mean and SD across folds)."""
+def summarise(run_id, experiment, model, feature_set, fold_scores, hyperparameters, code_reference, runtime_s,
+              notes="", threshold=f"p>={THRESHOLD}", validation_scheme=f"GroupKFold{N_SPLITS}"):
+    """Turn per-fold scores into one results row (mean and SD across folds).
+
+    AUC is the primary metric and log-loss the secondary. Accuracy has no column in the
+    template, so it goes at the start of the notes with its threshold.
+    """
     scores = pd.DataFrame(fold_scores)
+    mean = lambda metric: float(round(scores[metric].mean(), 4))
+    sd = lambda metric: float(round(scores[metric].std(), 4))
+    accuracy = f"accuracy={mean('accuracy')} (SD {sd('accuracy')}) at {threshold}"
     return {
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "experiment": experiment,
-        "model": model,
-        "features": features,
-        "params": params,
-        "validation": validation,
-        "seed": SEED,
-        "auc_mean": round(scores["auc"].mean(), 4),
-        "auc_std": round(scores["auc"].std(), 4),
-        "log_loss_mean": round(scores["log_loss"].mean(), 4),
-        "log_loss_std": round(scores["log_loss"].std(), 4),
-        "accuracy_mean": round(scores["accuracy"].mean(), 4),
-        "accuracy_std": round(scores["accuracy"].std(), 4),
-        "threshold": threshold,
-        "notes": notes,
+        "run_id": run_id, "track": "B", "experiment": experiment, "model": model,
+        "feature_set": feature_set, "validation_scheme": validation_scheme, "n_folds": N_SPLITS, "seed": SEED,
+        "hyperparameters": hyperparameters,
+        "primary_metric_name": "roc_auc", "primary_metric_mean": mean("auc"), "primary_metric_sd": sd("auc"),
+        "secondary_metric_name": "log_loss", "secondary_metric_mean": mean("log_loss"), "secondary_metric_sd": sd("log_loss"),
+        "threshold": threshold, "runtime_s": round(runtime_s, 2), "code_reference": code_reference,
+        "notes": "; ".join(part for part in [accuracy, notes] if part),
     }
 
 
 def log_run(row):
-    """Append one row to experimental_results.csv, writing the header if needed."""
-    is_new = not RESULTS_PATH.exists()
-    if not is_new:
+    """Write one row to experimental_results.csv, replacing any earlier row with the same run_id.
+
+    Rows are kept sorted by run_id, so re-running a step leaves one row per run.
+    """
+    rows = []
+    if RESULTS_PATH.exists():
         with open(RESULTS_PATH, newline="") as f:
-            assert next(csv.reader(f)) == RESULT_COLUMNS, "results file has different columns"
-    with open(RESULTS_PATH, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=RESULT_COLUMNS)
-        if is_new:
-            writer.writeheader()
-        writer.writerow(row)
+            reader = csv.DictReader(f)
+            assert reader.fieldnames == RESULT_COLUMNS, "results file has different columns"
+            rows = [r for r in reader if r["run_id"] != row["run_id"]]
+    rows.append(row)
+    with open(RESULTS_PATH, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=RESULT_COLUMNS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(sorted(rows, key=lambda r: r["run_id"]))
+
+
+def c_per_fold(chosen):
+    """Short hyperparameter label, e.g. 'C per fold 1/10/10/0.01/100; grid 0.001-100'."""
+    return f"C per fold {'/'.join(str(C) for C in chosen)}; {GRID_LABEL}"
 
 
 def run_constant(train):
     """Trivial baseline: predict the training folds' risky-choice rate for everyone."""
     y = train[TARGET].to_numpy()
     X = np.zeros((len(train), 1))  # DummyClassifier ignores X, so no column is used
+    start = time.perf_counter()
     fold_scores = []
     for fold, (train_idx, val_idx) in enumerate(grouped_folds(train), start=1):
         model = DummyClassifier(strategy="prior").fit(X[train_idx], y[train_idx])
@@ -108,7 +122,10 @@ def run_constant(train):
         scores = score_fold(y[val_idx], p)
         fold_scores.append(scores)
         print(f"fold {fold}: prior={p[0]:.4f} auc={scores['auc']:.4f} log_loss={scores['log_loss']:.4f} accuracy={scores['accuracy']:.4f}")
-    return summarise("constant", fold_scores, features="none", params="strategy=prior")
+    return summarise(
+        "B01", "baseline", "constant", "none", fold_scores, "strategy=prior", "src/baselines.py#run_constant",
+        time.perf_counter() - start,
+    )
 
 
 def ev_gap(df):
@@ -130,6 +147,7 @@ def run_ev_rule(train):
     y = train[TARGET].to_numpy()
     gap = ev_gap(train)
     X = gap.reshape(-1, 1)
+    start = time.perf_counter()
     fold_scores = []
     for fold, (train_idx, val_idx) in enumerate(grouped_folds(train), start=1):
         mapping = make_pipeline(StandardScaler(), LogisticRegression(penalty=None, max_iter=2000))
@@ -142,9 +160,9 @@ def run_ev_rule(train):
         slope = mapping[-1].coef_[0, 0]
         print(f"fold {fold}: slope={slope:.4f} auc={scores['auc']:.4f} log_loss={scores['log_loss']:.4f} accuracy={scores['accuracy']:.4f}")
     return summarise(
-        "ev_rule", fold_scores, features="ev_gap",
-        params="auc and accuracy=raw gap; log_loss=unpenalised logistic on gap, fit on training folds",
-        threshold="gap>0",
+        "B02", "baseline", "ev_rule", "ev_gap", fold_scores, "none (rule)", "src/baselines.py#run_ev_rule",
+        time.perf_counter() - start, threshold="gap>0",
+        notes="AUC and accuracy from raw EV gap; log_loss via unpenalised logistic mapping fitted on training folds",
     )
 
 
@@ -193,18 +211,28 @@ def print_logistic_folds(folds):
         print(f"fold {fold}: C={result['C']} inner_auc={result['inner_auc']:.4f} auc={s['auc']:.4f} log_loss={s['log_loss']:.4f} accuracy={s['accuracy']:.4f}")
 
 
-def logistic_params(folds, inner=f"GroupShuffleSplit({INNER_VAL_SHARE})"):
-    chosen = [result["C"] for result in folds]
-    return f"C per fold={chosen}; grid={C_GRID}; inner={inner} by AUC"
+def timed_logistic(train, X, **kwargs):
+    """cross_validate_logistic plus its wall-clock time in seconds."""
+    start = time.perf_counter()
+    folds = cross_validate_logistic(train, X, **kwargs)
+    return folds, time.perf_counter() - start
+
+
+def logistic_row(folds, runtime_s, run_id, experiment, feature_set, code_reference, notes="", **kwargs):
+    """A results row for a cross_validate_logistic run."""
+    return summarise(
+        run_id, experiment, "logistic_l2", feature_set, [result["scores"] for result in folds],
+        c_per_fold([result["C"] for result in folds]), code_reference, runtime_s, notes=notes, **kwargs,
+    )
 
 
 def run_logistic(train):
     """L2-regularised logistic regression on the presented gamble attributes."""
-    folds = cross_validate_logistic(train, train[RAW_FEATURES].to_numpy())
+    folds, runtime_s = timed_logistic(train, train[RAW_FEATURES].to_numpy())
     print_logistic_folds(folds)
-    return summarise(
-        "logistic_l2", [result["scores"] for result in folds], features="+".join(RAW_FEATURES),
-        params=logistic_params(folds),
+    return logistic_row(
+        folds, runtime_s, "B03", "baseline", "raw4", "src/baselines.py#run_logistic",
+        notes="L2; inner GroupShuffleSplit 0.25 by AUC",
     )
 
 
@@ -212,6 +240,7 @@ def run_lda(train):
     """LDA on the presented gamble attributes: Gaussian classes with a shared covariance."""
     X = train[RAW_FEATURES].to_numpy()
     y = train[TARGET].to_numpy()
+    start = time.perf_counter()
     fold_scores = []
     for fold, (train_idx, val_idx) in enumerate(grouped_folds(train), start=1):
         model = make_pipeline(StandardScaler(), LinearDiscriminantAnalysis())
@@ -219,7 +248,10 @@ def run_lda(train):
         scores = score_fold(y[val_idx], model.predict_proba(X[val_idx])[:, 1])
         fold_scores.append(scores)
         print(f"fold {fold}: auc={scores['auc']:.4f} log_loss={scores['log_loss']:.4f} accuracy={scores['accuracy']:.4f}")
-    return summarise("lda", fold_scores, features="+".join(RAW_FEATURES), params="solver=svd; shrinkage=None")
+    return summarise(
+        "B04", "baseline", "lda", "raw4", fold_scores, "solver=svd; shrinkage=None", "src/baselines.py#run_lda",
+        time.perf_counter() - start,
+    )
 
 
 def make_svm(C):
@@ -242,6 +274,7 @@ def run_svm(train):
     X = train[RAW_FEATURES].to_numpy()
     y = train[TARGET].to_numpy()
     groups = train[GROUP].to_numpy()
+    start = time.perf_counter()
     fold_scores, chosen = [], []
     for fold, (train_idx, val_idx) in enumerate(grouped_folds(train), start=1):
         C, inner_auc = choose_C(X[train_idx], y[train_idx], groups[train_idx], make_model=make_svm)
@@ -255,9 +288,10 @@ def run_svm(train):
         chosen.append(C)
         print(f"fold {fold}: C={C} inner_auc={inner_auc:.4f} auc={scores['auc']:.4f} log_loss={scores['log_loss']:.4f} accuracy={scores['accuracy']:.4f}")
     return summarise(
-        "linear_svm", fold_scores, features="+".join(RAW_FEATURES),
-        params=f"C per fold={chosen}; grid={C_GRID}; inner=GroupShuffleSplit({INNER_VAL_SHARE}) by AUC; log_loss=logistic mapping on grouped out-of-fold scores",
-        threshold="score>0",
+        "B05", "baseline", "linear_svm", "raw4", fold_scores, c_per_fold(chosen), "src/baselines.py#run_svm",
+        time.perf_counter() - start, threshold="score>0",
+        notes=("kernel=linear; inner GroupShuffleSplit 0.25 by AUC; AUC and accuracy from SVM score; "
+               "log_loss via logistic mapping on grouped out-of-fold scores"),
     )
 
 
@@ -267,11 +301,16 @@ RUNNERS = {
 }
 
 
+def print_rows(rows):
+    columns = ["run_id", "experiment", "feature_set", "validation_scheme", "primary_metric_mean", "primary_metric_sd",
+               "secondary_metric_mean", "secondary_metric_sd", "runtime_s"]
+    print(pd.DataFrame(rows)[columns].to_string(index=False))
+
+
 def main():
-    name = sys.argv[1]
-    row = RUNNERS[name](load_train())
+    row = RUNNERS[sys.argv[1]](load_train())
     log_run(row)
-    print(pd.DataFrame([row])[["model", "auc_mean", "auc_std", "log_loss_mean", "log_loss_std", "accuracy_mean", "accuracy_std"]].to_string(index=False))
+    print_rows([row])
 
 
 if __name__ == "__main__":

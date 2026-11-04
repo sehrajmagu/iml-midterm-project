@@ -5,11 +5,13 @@ Usage: python3 src/make_submission.py
 The final model is E2a, chosen by grouped-CV results among the candidates E1 and E2a. No Kaggle
 score is used. The folds and the solver have no random step; SEED is recorded in the results row.
 """
+import time
+
 import numpy as np
 import pandas as pd
 
 from baselines import (
-    C_GRID, GROUP, RAW_FEATURES, RESULTS_PATH, ROOT, TARGET, grouped_folds, load_train, log_run,
+    C_GRID, GRID_LABEL, GROUP, RAW_FEATURES, ROOT, TARGET, grouped_folds, load_train, log_run,
     make_logistic, score_fold, summarise,
 )
 from experiments import frame_features, gap_features
@@ -74,15 +76,13 @@ def build_submission(test, sample, p):
     return submission
 
 
-def log_final_once(fold_scores, C):
-    """Log the fixed-C CV row only if it is not already there, so rebuilding adds no duplicate."""
-    if RESULTS_PATH.exists() and "final" in pd.read_csv(RESULTS_PATH)["experiment"].values:
-        return
+def log_final(fold_scores, C, runtime_s):
+    """Log the fixed-C CV row as B15. log_run replaces an earlier B15, so rebuilding adds no duplicate."""
     log_run(summarise(
-        "logistic_l2", fold_scores, experiment="final",
-        features="E2a features: raw 4 + ev_gap + domain x frame cells",
-        params=f"fixed C={C}; chosen by mean GroupKFold AUC on the same folds; grid={C_GRID}",
-        notes="slightly optimistic: C was chosen on these folds; the nested estimate is the E2a row",
+        "B15", "final", "logistic_l2", "raw4+ev_gap+domain_x_frame", fold_scores, f"C={C}",
+        "src/make_submission.py#choose_final_C", runtime_s,
+        notes=(f"final model; C chosen by mean GroupKFold AUC over {GRID_LABEL} on these same folds "
+               "so slightly optimistic; nested estimate is B09"),
     ))
 
 
@@ -93,10 +93,12 @@ def main():
     check_test_file(test, train)
 
     X = final_features(train)
+    start = time.perf_counter()
     C, fold_scores, grid_results = choose_final_C(train, X.to_numpy())
+    runtime_s = time.perf_counter() - start
     print(grid_results.round(4).to_string(index=False))
     print(f"chosen C={C}")
-    log_final_once(fold_scores, C)
+    log_final(fold_scores, C, runtime_s)
 
     model = make_logistic(C).fit(X.to_numpy(), train[TARGET].to_numpy())
     print("final model coefficients (per SD of each feature):")

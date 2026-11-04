@@ -62,3 +62,17 @@ preference for risk. Exact parameter distributions are withheld.
 
 Licence: CC BY 4.0. Citation: *IML 2026 Track B simulated risky-choice dataset, Ashoka University (simulated)*.
 Kaggle URL: **To be announced.**
+
+## Reproducing the results
+
+Install the pinned environment with `python3 -m pip install -r requirements.txt`, then run
+`python3 run_all.py` (optionally `--seed 0`). It regenerates `experimental_results.csv`,
+`predictions/submission.csv`, `figures/` and `results/error_analysis/` in about 70 seconds.
+
+**Hidden warnings.** On the development machine (macOS arm64, NumPy 2.0.2), NumPy's matrix
+multiply raises `RuntimeWarning: divide by zero / overflow / invalid value encountered in matmul`
+thousands of times during scikit-learn fits. `run_all.py` hides only these three messages so the
+output is readable; all other warnings still appear. They do not affect the results: refitting the
+models with an independent Newton solver gave the same log-loss to within about 0.00001, and the
+outputs are identical with and without the filter. The cause was not identified. Running a script
+in `src/` directly does not apply the filter, so the warnings appear there.
